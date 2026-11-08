@@ -1,0 +1,120 @@
+import asyncio
+from aiogram import Bot, Dispatcher, types, F
+from aiogram.filters import Command
+from aiogram.enums import ParseMode
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.utils.keyboard import ReplyKeyboardBuilder
+from openai import AsyncOpenAI
+
+TELEGRAM_TOKEN = "8765732336:AAE93UigYFl4C3Y7PQ9nahrdWJAhhsWno00"
+GROQ_API_KEY = "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"
+
+client = AsyncOpenAI(
+    api_key=GROQ_API_KEY,
+    base_url="https://api.groq.com/openai/v1"
+)
+
+AI_MODEL = "qwen/qwen3.8-27b"
+
+bot = Bot(token=TELEGRAM_TOKEN)
+storage = MemoryStorage()
+dp = Dispatcher(storage=storage)
+
+# Состояния
+class OfferState(StatesGroup):
+    waiting_for_gift = State()
+    waiting_for_stars = State()
+    waiting_for_conditions = State()
+
+SYSTEM_PROMPT = """
+Ты — эксперт по написанию продающих офферов для обмена Telegram-подарков на Stars.
+Пиши только на русском языке.
+Стиль: живой, цепляющий, с эмодзи, без воды.
+Сделай текст так, чтобы его можно было сразу переслать другим людям.
+Не пиши ничего кроме готового текста оффера.
+"""
+
+# Кнопки с подарками
+def get_gifts_keyboard():
+    builder = ReplyKeyboardBuilder()
+    gifts = [
+        "🐻 Мишка", "❤️ Сердце", "🌹 Роза", "🎂 Торт",
+        "🎁 Коллекционный", "⭐ Другой подарок"
+    ]
+    for gift in gifts:
+        builder.button(text=gift)
+    builder.adjust(2)
+    return builder.as_markup(resize_keyboard=True)
+
+@dp.message(Command("start"))
+async def cmd_start(message: types.Message, state: FSMContext):
+    await state.clear()
+    await message.answer(
+        "Выбери подарок, который хочешь обменять на Stars:",
+        reply_markup=get_gifts_keyboard()
+    )
+    await state.set_state(OfferState.waiting_for_gift)
+
+@dp.message(OfferState.waiting_for_gift)
+async def process_gift(message: types.Message, state: FSMContext):
+    await state.update_data(gift=message.text)
+    await message.answer(
+        "Отлично! Теперь напиши, сколько Stars хочешь получить:\n\n"
+        "Просто число, например: <b>450</b>",
+        parse_mode=ParseMode.HTML,
+        reply_markup=types.ReplyKeyboardRemove()
+    )
+    await state.set_state(OfferState.waiting_for_stars)
+
+@dp.message(OfferState.waiting_for_stars)
+async def process_stars(message: types.Message, state: FSMContext):
+    await state.update_data(stars=message.text)
+    await message.answer(
+        "Есть особые условия? (гарант, срочно, только в лс и т.д.)\n\n"
+        "Если нет — напиши <b>нет</b>",
+        parse_mode=ParseMode.HTML
+    )
+    await state.set_state(OfferState.waiting_for_conditions)
+
+@dp.message(OfferState.waiting_for_conditions)
+async def process_conditions(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    gift = data.get("gift")
+    stars = data.get("stars")
+    conditions = message.text
+
+    wait_msg = await message.answer("Генерирую оффер...")
+
+    user_prompt = f"Подарок: {gift}\nКоличество Stars: {stars}\nУсловия: {conditions}"
+
+    try:
+        response = await client.chat.completions.create(
+            model=AI_MODEL,
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": user_prompt}
+            ],
+            temperature=0.85,
+            max_tokens=700
+        )
+        offer = response.choices[0].message.content.strip()
+        await wait_msg.edit_text(offer)
+        
+        await message.answer(
+            "Готово! Можешь пересылать этот оффер.\n\n"
+            "Чтобы создать новый — нажми /start",
+            reply_markup=types.ReplyKeyboardRemove()
+        )
+    except Exception as e:
+        await wait_msg.edit_text(f"Ошибка:\n<code>{str(e)}</code>", parse_mode=ParseMode.HTML)
+
+    await state.clear()
+
+async def main():
+    print("Бот запущен...")
+    await dp.start_polling(bot)
+
+if __name__ == "__main__":
+    asyncio.run(main())
